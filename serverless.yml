@@ -1,0 +1,278 @@
+service: ecommerce-microservice
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: ap-south-1
+  stage: dev
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:PutItem
+        - dynamodb:GetItem
+        - dynamodb:UpdateItem
+        - dynamodb:DeleteItem
+        - dynamodb:Scan
+      Resource:
+        - arn:aws:dynamodb:${self:provider.region}:${aws:accountId}:table/${self:custom.productsTableName}
+        - arn:aws:dynamodb:${self:provider.region}:${aws:accountId}:table/${self:custom.taxonomyTableName}
+  environment:
+    PRODUCTS_TABLE: ${self:custom.productsTableName}
+    TAXONOMY_TABLE: ${self:custom.taxonomyTableName}
+    AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+
+custom:
+  stage: ${opt:stage, self:provider.stage}
+  productsTableName: Products-${self:custom.stage}
+  taxonomyTableName: ProductTaxonomyAttributes-${self:custom.stage}
+
+functions:
+  createProduct:
+    handler: src/handlers/createProduct.createProduct
+  getProduct:
+    handler: src/handlers/getProduct.getProduct
+  getAllProducts:
+    handler: src/handlers/getAllProducts.getAllProducts
+  updateProduct:
+    handler: src/handlers/updateProduct.updateProduct
+  deleteProduct:
+    handler: src/handlers/deleteProduct.deleteProduct
+
+resources:
+  Resources:
+    ProductsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.productsTableName}
+        AttributeDefinitions:
+          - AttributeName: productId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: productId
+            KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+
+    ProductTaxonomyAttributesTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.taxonomyTableName}
+        AttributeDefinitions:
+          - AttributeName: taxonomyId
+            AttributeType: S
+          - AttributeName: parentId
+            AttributeType: S
+          - AttributeName: name
+            AttributeType: S
+        KeySchema:
+          - AttributeName: taxonomyId
+            KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+        GlobalSecondaryIndexes:
+          - IndexName: ParentIndex
+            KeySchema:
+              - AttributeName: parentId
+                KeyType: HASH
+              - AttributeName: name
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+
+    AppSyncGraphQLApi:
+      Type: AWS::AppSync::GraphQLApi
+      Properties:
+        Name: ecommerceAPI
+        AuthenticationType: API_KEY
+        XrayEnabled: true
+
+    AppSyncGraphQLSchema:
+      Type: AWS::AppSync::GraphQLSchema
+      Properties:
+        ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+        Definition: |
+          type Product {
+            productId: ID!
+            name: String!
+            description: String
+            price: Float!
+            category: String
+            stock: Int!
+            createdAt: String
+            updatedAt: String
+          }
+
+          type Query {
+            getProduct(productId: ID!): Product
+            getAllProducts: [Product]
+          }
+
+          type Mutation {
+            createProduct(name: String!, description: String, price: Float!, category: String, stock: Int!): Product
+            updateProduct(productId: ID!, name: String, description: String, price: Float, category: String, stock: Int): Product
+            deleteProduct(productId: ID!): String
+          }
+
+          schema {
+            query: Query
+            mutation: Mutation
+          }
+
+    AppSyncDataSourceCreateProduct:
+      Type: AWS::AppSync::DataSource
+      Properties:
+        ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+        Name: CreateProductLambda
+        Type: AWS_LAMBDA
+        LambdaConfig:
+          LambdaFunctionArn: !GetAtt CreateProductLambdaFunction.Arn
+        ServiceRoleArn: !GetAtt AppSyncIAMRole.Arn
+
+    AppSyncDataSourceGetProduct:
+      Type: AWS::AppSync::DataSource
+      Properties:
+        ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+        Name: GetProductLambda
+        Type: AWS_LAMBDA
+        LambdaConfig:
+          LambdaFunctionArn: !GetAtt GetProductLambdaFunction.Arn
+        ServiceRoleArn: !GetAtt AppSyncIAMRole.Arn
+
+    AppSyncDataSourceGetAllProducts:
+      Type: AWS::AppSync::DataSource
+      Properties:
+        ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+        Name: GetAllProductsLambda
+        Type: AWS_LAMBDA
+        LambdaConfig:
+          LambdaFunctionArn: !GetAtt GetAllProductsLambdaFunction.Arn
+        ServiceRoleArn: !GetAtt AppSyncIAMRole.Arn
+
+    AppSyncDataSourceUpdateProduct:
+      Type: AWS::AppSync::DataSource
+      Properties:
+        ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+        Name: UpdateProductLambda
+        Type: AWS_LAMBDA
+        LambdaConfig:
+          LambdaFunctionArn: !GetAtt UpdateProductLambdaFunction.Arn
+        ServiceRoleArn: !GetAtt AppSyncIAMRole.Arn
+
+    AppSyncDataSourceDeleteProduct:
+      Type: AWS::AppSync::DataSource
+      Properties:
+        ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+        Name: DeleteProductLambda
+        Type: AWS_LAMBDA
+        LambdaConfig:
+          LambdaFunctionArn: !GetAtt DeleteProductLambdaFunction.Arn
+        ServiceRoleArn: !GetAtt AppSyncIAMRole.Arn
+
+    AppSyncIAMRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: appsync.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: AppSyncPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - lambda:InvokeFunction
+                  Resource: "*"
+
+    CreateProductResolver:
+      Type: AWS::AppSync::Resolver
+      Properties:
+        ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+        TypeName: Mutation
+        FieldName: createProduct
+        DataSourceName: !GetAtt AppSyncDataSourceCreateProduct.Name
+        RequestMappingTemplate: |
+          {
+            "version": "2018-05-29",
+            "operation": "Invoke",
+            "payload": $util.toJson($ctx.args)
+          }
+        ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
+
+    GetProductResolver:
+      Type: AWS::AppSync::Resolver
+      Properties:
+        ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+        TypeName: Query
+        FieldName: getProduct
+        DataSourceName: !GetAtt AppSyncDataSourceGetProduct.Name
+        RequestMappingTemplate: |
+          {
+            "version": "2018-05-29",
+            "operation": "Invoke",
+            "payload": {
+              "productId": $util.toJson($ctx.args.productId)
+            }
+          }
+        ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
+
+    GetAllProductsResolver:
+      Type: AWS::AppSync::Resolver
+      Properties:
+        ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+        TypeName: Query
+        FieldName: getAllProducts
+        DataSourceName: !GetAtt AppSyncDataSourceGetAllProducts.Name
+        RequestMappingTemplate: |
+          {
+            "version": "2018-05-29",
+            "operation": "Invoke",
+            "payload": $util.toJson($ctx.args)
+          }
+        ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
+
+    UpdateProductResolver:
+      Type: AWS::AppSync::Resolver
+      Properties:
+        ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+        TypeName: Mutation
+        FieldName: updateProduct
+        DataSourceName: !GetAtt AppSyncDataSourceUpdateProduct.Name
+        RequestMappingTemplate: |
+          {
+            "version": "2018-05-29",
+            "operation": "Invoke",
+            "payload": {
+              "productId": $util.toJson($ctx.args.productId),
+              "name": $util.toJson($ctx.args.name),
+              "description": $util.toJson($ctx.args.description),
+              "price": $util.toJson($ctx.args.price),
+              "category": $util.toJson($ctx.args.category),
+              "stock": $util.toJson($ctx.args.stock)
+            }
+          }
+        ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
+
+    DeleteProductResolver:
+      Type: AWS::AppSync::Resolver
+      Properties:
+        ApiId: !GetAtt AppSyncGraphQLApi.ApiId
+        TypeName: Mutation
+        FieldName: deleteProduct
+        DataSourceName: !GetAtt AppSyncDataSourceDeleteProduct.Name
+        RequestMappingTemplate: |
+          {
+            "version": "2018-05-29",
+            "operation": "Invoke",
+            "payload": {
+              "productId": $util.toJson($ctx.args.productId)
+            }
+          }
+        ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
